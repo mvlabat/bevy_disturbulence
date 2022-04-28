@@ -1,9 +1,9 @@
 [package]
-name = "bevy_networking_turbulence"
-version = "0.4.1"
+name = "bevy_disturbulence"
+version = "0.1.0"
 edition = "2021"
-authors = ["Tomasz Sterna <tomasz@sterna.link>"]
-description = "Networking plugin for Bevy engine running on naia-socket and turbulence libraries"
+authors = ["mvlabat <mvlabat@gmail.com"]
+description = "Networking plugin for the Bevy game engine"
 readme = "README.md"
 license = "MIT"
 homepage = "https://github.com/smokku/bevy_networking_turbulence"
@@ -27,7 +27,7 @@ use-webrtc = [
 ]
 
 [dependencies]
-bevy = { version = "0.6", default-features = false }
+bevy = { version = "0.7", default-features = false }
 turbulence = "0.3"
 naia-client-socket = { version = "0.6", features = ["multithread"] }
 bytes = "1.1"

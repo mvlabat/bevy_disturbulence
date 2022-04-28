@@ -1,7 +1,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::Task;
 use bevy::{
-    app::{App, CoreStage, Events, Plugin},
+    ecs::event::Events,
+    app::{App, CoreStage, Plugin},
     core::FixedTimestep,
     prelude::*,
     tasks::{IoTaskPool, TaskPool},
@@ -39,6 +40,7 @@ pub use turbulence::{
 
 mod channels;
 mod transport;
+
 use self::{
     channels::{SimpleBufferPool, TaskPoolRuntime},
     transport::MultiplexedPacket,
@@ -85,8 +87,8 @@ impl Plugin for NetworkingPlugin {
             self.idle_timeout_ms,
             self.auto_heartbeat_ms,
         ))
-        .add_event::<NetworkEvent>()
-        .add_system(receive_packets.system());
+            .add_event::<NetworkEvent>()
+            .add_system(receive_packets);
         if self.idle_timeout_ms.is_some() || self.auto_heartbeat_ms.is_some() {
             // heartbeats and timeouts checking/sending only runs infrequently:
             app.add_stage_after(
@@ -97,7 +99,7 @@ impl Plugin for NetworkingPlugin {
                         self.heartbeats_and_timeouts_timestep_in_seconds
                             .unwrap_or(0.5),
                     ))
-                    .with_system(heartbeats_and_timeouts.system()),
+                    .with_system(heartbeats_and_timeouts),
             );
         }
     }
@@ -383,8 +385,8 @@ impl NetworkResource {
     }
 
     pub fn set_channels_builder<F>(&mut self, builder: F)
-    where
-        F: Fn(&mut ConnectionChannelsBuilder) + Send + Sync + 'static,
+        where
+            F: Fn(&mut ConnectionChannelsBuilder) + Send + Sync + 'static,
     {
         self.channels_builder_fn = Some(Box::new(builder));
     }
