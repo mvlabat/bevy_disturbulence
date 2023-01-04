@@ -5,24 +5,17 @@
   via reliable channel client->server
 */
 
-use bevy::{
-    app::{ScheduleRunnerPlugin, ScheduleRunnerSettings},
-    log::LogPlugin,
-    prelude::*,
-    render::camera::WindowOrigin,
-};
-use bevy_networking_turbulence::{
+use bevy::{app::ScheduleRunnerSettings, log::LogPlugin, prelude::*};
+use bevy_disturbulence::{
     ConnectionChannelsBuilder, MessageChannelMode, MessageChannelSettings, NetworkEvent,
-    NetworkResource, NetworkingPlugin, ReliableChannelSettings,
+    NetworkResource, NetworkingPlugin, ReliableChannelSettings, UnreliableChannelSettings,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 mod utils;
-use utils::{parse_simple_args, SimpleArgs as Args};
 
-const SERVER_PORT: u16 = 14192;
 const BOARD_WIDTH: u32 = 1000;
 const BOARD_HEIGHT: u32 = 1000;
 
@@ -43,38 +36,41 @@ struct BallsExample;
 
 impl Plugin for BallsExample {
     fn build(&self, app: &mut App) {
-        let args = parse_simple_args();
-        if args.is_server {
+        if cfg!(feature = "server") {
             // Server
             app.insert_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
                 1.0 / 60.0,
             )))
             .add_plugins(MinimalPlugins)
-            .add_plugin(LogPlugin)
-            .add_plugin(ScheduleRunnerPlugin::default())
-            .add_startup_system(server_setup.system())
-            .add_system(ball_movement_system.system())
+            .add_plugin(LogPlugin::default())
+            .add_system(ball_movement_system)
             .insert_resource(NetworkBroadcast { frame: 0 })
-            .add_system_to_stage(CoreStage::PreUpdate, handle_messages_server.system())
-            .add_system_to_stage(CoreStage::PostUpdate, network_broadcast_system.system())
-        } else {
+            .add_system_to_stage(CoreStage::PreUpdate, handle_messages_server_system)
+            .add_system_to_stage(CoreStage::PostUpdate, network_broadcast_system);
+        } else if cfg!(feature = "client") {
             // Client
-            app.insert_resource(WindowDescriptor {
-                width: BOARD_WIDTH as f32,
-                height: BOARD_HEIGHT as f32,
+            app.add_plugins(DefaultPlugins.build().set(WindowPlugin {
+                window: WindowDescriptor {
+                    width: BOARD_WIDTH as f32,
+                    height: BOARD_HEIGHT as f32,
+                    ..Default::default()
+                },
                 ..Default::default()
-            })
-            .add_plugins(DefaultPlugins)
+            }))
             .insert_resource(ClearColor(Color::rgb(0.3, 0.3, 0.3)))
-            .add_startup_system(client_setup.system())
-            .add_system_to_stage(CoreStage::PreUpdate, handle_messages_client.system())
+            .add_system_to_stage(CoreStage::PreUpdate, handle_messages_client_system)
             .insert_resource(ServerIds::default())
-            .add_system(ball_control_system.system())
-        }
-        .insert_resource(args)
-        .add_plugin(NetworkingPlugin::default())
-        .add_startup_system(network_setup.system())
-        .add_system(handle_packets.system());
+            .add_system(ball_control_system);
+        };
+
+        app.add_plugin(NetworkingPlugin::default())
+            .add_startup_system(network_setup_system)
+            .add_system(handle_packets_system);
+
+        #[cfg(feature = "server")]
+        app.add_startup_system(server_setup_system.after(network_setup_system));
+        #[cfg(feature = "client")]
+        app.add_startup_system(client_setup_system.after(network_setup_system));
     }
 }
 
@@ -95,7 +91,7 @@ fn ball_movement_system(time: Res<Time>, mut ball_query: Query<(&Ball, &mut Tran
     }
 }
 
-fn ball_control_system(mut net: ResMut<NetworkResource>, keyboard_input: Res<Input<KeyCode>>) {
+fn ball_control_system(mut net: NonSendMut<NetworkResource>, keyboard_input: Res<Input<KeyCode>>) {
     if keyboard_input.pressed(KeyCode::Left) {
         net.broadcast_message(ClientMessage::Direction(Direction::Left));
     }
@@ -105,27 +101,27 @@ fn ball_control_system(mut net: ResMut<NetworkResource>, keyboard_input: Res<Inp
     }
 }
 
-fn server_setup(mut net: ResMut<NetworkResource>) {
-    let ip_address =
-        bevy_networking_turbulence::find_my_ip_address().expect("can't find ip address");
-    let socket_address = SocketAddr::new(ip_address, SERVER_PORT);
+#[cfg(feature = "server")]
+fn server_setup_system(mut net: NonSendMut<NetworkResource>) {
     info!("Starting server");
-    net.listen(socket_address, None, None);
+    net.listen(&bevy_disturbulence::ServerAddrs {
+        session_listen_addr: "127.0.0.1:8089".parse().unwrap(),
+        webrtc_listen_addr: "127.0.0.1:8089".parse().unwrap(),
+        public_webrtc_url: "http://127.0.0.1:8089".to_string(),
+    });
 }
 
-fn client_setup(mut commands: Commands, mut net: ResMut<NetworkResource>) {
-    let mut camera = OrthographicCameraBundle::new_2d();
-    camera.orthographic_projection.window_origin = WindowOrigin::BottomLeft;
-    commands.spawn_bundle(camera);
+#[cfg(feature = "client")]
+fn client_setup_system(mut commands: Commands, mut net: NonSendMut<NetworkResource>) {
+    let mut camera = bevy::prelude::Camera2dBundle::default();
+    camera.projection.window_origin = bevy::render::camera::WindowOrigin::BottomLeft;
+    commands.spawn(camera);
 
-    let ip_address =
-        bevy_networking_turbulence::find_my_ip_address().expect("can't find ip address");
-    let socket_address = SocketAddr::new(ip_address, SERVER_PORT);
     info!("Starting client");
-    net.connect(socket_address);
+    net.connect("http://127.0.0.1:8089");
 }
 
-fn network_setup(mut net: ResMut<NetworkResource>) {
+fn network_setup_system(mut net: NonSendMut<NetworkResource>) {
     net.set_channels_builder(|builder: &mut ConnectionChannelsBuilder| {
         builder
             .register::<ClientMessage>(CLIENT_STATE_MESSAGE_SETTINGS)
@@ -136,7 +132,7 @@ fn network_setup(mut net: ResMut<NetworkResource>) {
     });
 }
 
-#[derive(Default)]
+#[derive(Resource, Default)]
 struct NetworkBroadcast {
     frame: u32,
 }
@@ -156,13 +152,13 @@ enum ClientMessage {
 const CLIENT_STATE_MESSAGE_SETTINGS: MessageChannelSettings = MessageChannelSettings {
     channel: 0,
     channel_mode: MessageChannelMode::Reliable {
-        reliability_settings: ReliableChannelSettings {
+        settings: ReliableChannelSettings {
             bandwidth: 4096,
             recv_window_size: 1024,
             send_window_size: 1024,
             burst_bandwidth: 1024,
             init_send: 512,
-            wakeup_time: Duration::from_millis(100),
+            resend_time: Duration::from_millis(100),
             initial_rtt: Duration::from_millis(200),
             max_rtt: Duration::from_secs(2),
             rtt_update_factor: 0.1,
@@ -182,14 +178,20 @@ struct GameStateMessage {
 
 const GAME_STATE_MESSAGE_SETTINGS: MessageChannelSettings = MessageChannelSettings {
     channel: 1,
-    channel_mode: MessageChannelMode::Unreliable,
+    channel_mode: MessageChannelMode::Unreliable {
+        settings: UnreliableChannelSettings {
+            bandwidth: 4096,
+            burst_bandwidth: 1024,
+        },
+        max_message_len: 1024,
+    },
     message_buffer_size: 8,
     packet_buffer_size: 8,
 };
 
 fn network_broadcast_system(
     mut state: ResMut<NetworkBroadcast>,
-    mut net: ResMut<NetworkResource>,
+    mut net: NonSendMut<NetworkResource>,
     ball_query: Query<(Entity, &Ball, &Transform)>,
 ) {
     let mut message = GameStateMessage {
@@ -201,16 +203,15 @@ fn network_broadcast_system(
     for (entity, ball, transform) in ball_query.iter() {
         message
             .balls
-            .push((entity.id(), ball.velocity, transform.translation));
+            .push((entity.index(), ball.velocity, transform.translation));
     }
 
     net.broadcast_message(message);
 }
 
-fn handle_packets(
+fn handle_packets_system(
     mut commands: Commands,
-    mut net: ResMut<NetworkResource>,
-    args: Res<Args>,
+    mut net: NonSendMut<NetworkResource>,
     mut network_events: EventReader<NetworkEvent>,
 ) {
     for event in network_events.iter() {
@@ -231,7 +232,7 @@ fn handle_packets(
                             let pos_x = rng.gen_range(0..BOARD_WIDTH) as f32;
                             let pos_y = rng.gen_range(0..BOARD_HEIGHT) as f32;
                             info!("Spawning {}x{} {}/{}", pos_x, pos_y, vel_x, vel_y);
-                            commands.spawn_bundle((
+                            commands.spawn((
                                 Ball {
                                     velocity: 400.0 * Vec3::new(vel_x, vel_y, 0.0).normalize(),
                                 },
@@ -246,7 +247,7 @@ fn handle_packets(
                         }
                     }
 
-                    if !args.is_server {
+                    if cfg!(feature = "client") {
                         debug!("Sending Hello on [{}]", handle);
                         match net.send_message(*handle, ClientMessage::Hello("test".to_string())) {
                             Ok(msg) => match msg {
@@ -268,7 +269,10 @@ fn handle_packets(
     }
 }
 
-fn handle_messages_server(mut net: ResMut<NetworkResource>, mut balls: Query<(&mut Ball, &Pawn)>) {
+fn handle_messages_server_system(
+    mut net: NonSendMut<NetworkResource>,
+    mut balls: Query<(&mut Ball, &Pawn)>,
+) {
     for (handle, connection) in net.connections.iter_mut() {
         let channels = connection.channels().unwrap();
         while let Some(client_message) = channels.recv::<ClientMessage>() {
@@ -301,16 +305,19 @@ fn handle_messages_server(mut net: ResMut<NetworkResource>, mut balls: Query<(&m
     }
 }
 
-type ServerIds = HashMap<u32, (u32, u32)>;
+#[derive(Resource, Deref, DerefMut, Default)]
+struct ServerIds(HashMap<u32, (u32, u32)>);
 
-fn handle_messages_client(
+fn handle_messages_client_system(
     mut commands: Commands,
-    mut net: ResMut<NetworkResource>,
+    mut net: NonSendMut<NetworkResource>,
     mut server_ids: ResMut<ServerIds>,
     mut balls: Query<(Entity, &mut Ball, &mut Transform)>,
 ) {
     for (handle, connection) in net.connections.iter_mut() {
-        let channels = connection.channels().unwrap();
+        let Some(channels) = connection.channels() else {
+            continue;
+        };
         while let Some(_client_message) = channels.recv::<ClientMessage>() {
             error!("ClientMessage received on [{}]", handle);
         }
@@ -327,7 +334,7 @@ fn handle_messages_client(
 
             // update all balls
             for (entity, mut ball, mut transform) in balls.iter_mut() {
-                let server_id_entry = server_ids.get_mut(&entity.id()).unwrap();
+                let server_id_entry = server_ids.get_mut(&entity.index()).unwrap();
                 let (server_id, update_frame) = *server_id_entry;
 
                 if let Some(index) = state_message
@@ -362,7 +369,7 @@ fn handle_messages_client(
         for (id, (frame, velocity, translation)) in to_spawn.iter() {
             info!("Spawning {} @{}", id, frame);
             let entity = commands
-                .spawn_bundle(SpriteBundle {
+                .spawn(SpriteBundle {
                     transform: Transform::from_translation(*translation),
                     sprite: Sprite {
                         color: Color::rgb(0.8 - (*id as f32 / 5.0), 0.2, 0.2 + (*id as f32 / 5.0)),
@@ -376,7 +383,7 @@ fn handle_messages_client(
                 })
                 .insert(Pawn { controller: *id })
                 .id();
-            server_ids.insert(entity.id(), (*id, *frame));
+            server_ids.insert(entity.index(), (*id, *frame));
         }
     }
 }

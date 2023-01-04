@@ -1,68 +1,60 @@
-use bevy::{app::ScheduleRunnerSettings, log::LogPlugin, prelude::*};
-use bevy_networking_turbulence::{NetworkEvent, NetworkResource, NetworkingPlugin, Packet};
-
-use std::{net::SocketAddr, time::Duration};
-
-mod utils;
-use utils::{parse_simple_args, SimpleArgs as Args};
-
-const SERVER_PORT: u16 = 14191;
+use bevy::{
+    app::ScheduleRunnerSettings,
+    log::{self, LogPlugin},
+    prelude::*,
+};
+use bevy_disturbulence::{NetworkEvent, NetworkResource, NetworkingPlugin, Packet};
+use std::time::Duration;
 
 fn main() {
-    App::new()
-        // minimal plugins necessary for timers + headless loop
+    let mut app = App::new();
+    app
+        // Minimal plugins necessary for timers + headless loop
         .insert_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
         .add_plugins(MinimalPlugins)
-        .add_plugin(LogPlugin)
-        // The NetworkingPlugin
+        .add_plugin(LogPlugin::default())
         .add_plugin(NetworkingPlugin::default())
-        // Our networking
-        .insert_resource(parse_simple_args())
-        .add_startup_system(startup.system())
-        .add_system(send_packets.system())
-        .add_system(handle_packets.system())
-        .run();
+        // The example systems
+        .add_system(send_packets_system)
+        .add_system(handle_packets_system);
+
+    #[cfg(feature = "server")]
+    app.add_startup_system(server_startup_system);
+    #[cfg(feature = "client")]
+    app.add_startup_system(client_startup_system);
+
+    app.run();
 }
 
-fn startup(mut net: ResMut<NetworkResource>, args: Res<Args>) {
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "wasm32")] {
-            // set the following address to your server address (i.e. local machine)
-            // and remove compile_error! line
-            let mut server_address: SocketAddr = "192.168.1.1:0".parse().unwrap();
-            compile_error!("You need to set server_address.");
-            server_address.set_port(SERVER_PORT);
-        } else {
-            let ip_address =
-                bevy_networking_turbulence::find_my_ip_address().expect("can't find ip address");
-            let server_address = SocketAddr::new(ip_address, SERVER_PORT);
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    if args.is_server {
-        info!("Starting server");
-        net.listen(server_address, None, None);
-    }
-    if !args.is_server {
-        info!("Starting client");
-        net.connect(server_address);
-    }
+#[cfg(feature = "server")]
+fn server_startup_system(mut net: NonSendMut<NetworkResource>) {
+    log::info!("Starting server");
+    net.listen(&naia_server_socket::ServerAddrs {
+        session_listen_addr: "127.0.0.1:8088".parse().unwrap(),
+        webrtc_listen_addr: "127.0.0.1:8088".parse().unwrap(),
+        public_webrtc_url: "http://127.0.0.1:8088".to_string(),
+    });
 }
 
-fn send_packets(mut net: ResMut<NetworkResource>, time: Res<Time>, args: Res<Args>) {
-    if !args.is_server {
+#[cfg(feature = "client")]
+fn client_startup_system(mut net: NonSendMut<NetworkResource>) {
+    log::info!("Starting client");
+    net.connect("http://127.0.0.1:8088");
+}
+
+fn send_packets_system(mut net: NonSendMut<NetworkResource>, time: Res<Time>) {
+    if cfg!(feature = "client") && (time.elapsed_seconds() * 60.) as i64 % 60 == 0 {
         // Client context
-        if (time.seconds_since_startup() * 60.) as i64 % 60 == 0 {
-            info!("PING");
-            net.broadcast(Packet::from("PING"));
+        if !net.connections.is_empty() {
+            log::info!("PING");
+            net.broadcast(&Packet::from("PING")).unwrap();
         }
     }
 }
-fn handle_packets(
-    mut net: ResMut<NetworkResource>,
+fn handle_packets_system(
+    mut net: NonSendMut<NetworkResource>,
     time: Res<Time>,
     mut reader: EventReader<NetworkEvent>,
 ) {
@@ -70,20 +62,20 @@ fn handle_packets(
         match event {
             NetworkEvent::Packet(handle, packet) => {
                 let message = String::from_utf8_lossy(packet);
-                info!("Got packet on [{}]: {}", handle, message);
+                log::info!("Got packet on [{}]: {}", handle, message);
                 if message == "PING" {
-                    let message = format!("PONG @ {}", time.seconds_since_startup());
+                    let message = format!("PONG @ {}", time.elapsed_seconds());
                     match net.send(*handle, Packet::from(message)) {
                         Ok(()) => {
-                            info!("Sent PONG");
+                            log::info!("Sent PONG");
                         }
                         Err(error) => {
-                            info!("PONG send error: {}", error);
+                            log::info!("PONG send error: {}", error);
                         }
                     }
                 }
             }
-            event => info!("{event:?} received!"),
+            event => log::info!("{event:?} received!"),
         }
     }
 }

@@ -6,51 +6,54 @@ authors = ["mvlabat <mvlabat@gmail.com"]
 description = "Networking plugin for the Bevy game engine"
 readme = "README.md"
 license = "MIT"
-homepage = "https://github.com/smokku/bevy_networking_turbulence"
-repository = "https://github.com/smokku/bevy_networking_turbulence"
-keywords = ["bevy", "gamedev", "networking", "udp", "webrtc"]
+homepage = "https://github.com/mvlabat/bevy_disturbulence"
+repository = "https://github.com/mvlabat/bevy_disturbulence"
+keywords = ["bevy", "gamedev", "networking", "webrtc"]
 categories = [
     "game-development",
     "network-programming",
     "wasm",
     "web-programming",
 ]
-exclude = [".git*"]
 
 [features]
-default = ["use-udp"]
-use-udp = ["naia-server-socket/use-udp"]
-use-webrtc = [
-    "naia-server-socket/use-webrtc",
-    "naia-client-socket/wbindgen",
-    "futures-timer/wasm-bindgen",
-]
+default = []
+client = ["naia-client-socket"]
+server = ["naia-server-socket"]
 
 [dependencies]
-bevy = { version = "0.7", default-features = false }
-turbulence = "0.3"
-naia-client-socket = { version = "0.6", features = ["multithread"] }
-bytes = "1.1"
+bevy = { version = "0.9", default-features = false }
+turbulence = "0.4"
+naia-client-socket = { version = "0.13", optional = true }
+naia-server-socket = { version = "0.13", optional = true }
+naia-socket-shared = "0.10.1"
+bytes = "1.2"
 futures-lite = "1.12"
 crossbeam-channel = "0.5"
-cfg-if = "1.0"
 instant = "0.1"
 futures = "0.3"
-futures-timer = "3.0"
+wasm-timer = "0.2.5"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-naia-server-socket = "0.5"
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+naia-client-socket = { version = "0.13", optional = true, features = ["wbindgen"] }
+naia-socket-shared = { version = "0.10.1", features = ["wbindgen"] }
 
 [dev-dependencies]
 clap = "2.34.0"
-bevy = { version = "0.6", default-features = false }
+bevy = { version = "0.9" }
 serde = { version = "1.0", features = ["derive"] }
 rand = { version = "0.8" }
 console_error_panic_hook = "0.1"
 console_log = "0.2"
-wasm-bindgen = "=0.2.78" # pin to Bevy's dependency
+wasm-bindgen = "=0.2.83"
 
 [[example]]
 name = "channels"
 path = "examples/channels.rs"
 required-features = ["bevy/default"]
+
+[patch.crates-io]
+naia-client-socket = { path = "../naia/socket/client" }
+naia-server-socket = { path = "../naia/socket/server" }
+naia-socket-shared = { path = "../naia/socket/shared" }
+webrtc-unreliable-client = { path = "../webrtc-unreliable-client-0.1.3" }

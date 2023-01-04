@@ -3,7 +3,7 @@
 * If you send a `packet` it is dispatched immediately.
 * If you send a `message`, which must be smaller than the maximum packet size, turbulence will coalesce multiple messages into a single packet.
 * When you call turbulence's `flush()` function on a channel, all pending outbound messages are coalesced into as few packets as possible and sent.
-* Default behaviour of `bevy_networking_turbulence` is to call flush after every `send_message` or `broadcast_message`
+* Default behaviour of `bevy_disturbulence` is to call flush after every `send_message` or `broadcast_message`
 * You can change this to flush once per tick instead, which may reduce the number of packets you are sending.
 
 ## Auto-flushing channels (default)

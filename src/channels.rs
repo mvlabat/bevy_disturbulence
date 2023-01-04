@@ -1,10 +1,5 @@
-#[cfg(not(target_arch = "wasm32"))]
-use bevy::tasks::Task;
-use bevy::tasks::TaskPool;
-use futures_timer::Delay;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Mutex;
-use std::{future::Future, ops::Deref, pin::Pin, sync::Arc, time::Duration};
+use bevy::tasks::IoTaskPool;
+use std::{future::Future, pin::Pin, time::Duration};
 
 use turbulence::{buffer::BufferPool, runtime::Runtime};
 
@@ -19,34 +14,12 @@ impl BufferPool for SimpleBufferPool {
     }
 }
 
-#[derive(Clone)]
-pub struct TaskPoolRuntime(Arc<TaskPoolRuntimeInner>);
-
-pub struct TaskPoolRuntimeInner {
-    pool: TaskPool,
-    #[cfg(not(target_arch = "wasm32"))]
-    tasks: Mutex<Vec<Task<()>>>, // FIXME: cleanup finished
-}
+#[derive(Default, Clone)]
+pub struct TaskPoolRuntime;
 
 impl TaskPoolRuntime {
-    pub fn new(pool: TaskPool) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            TaskPoolRuntime(Arc::new(TaskPoolRuntimeInner {
-                pool,
-                tasks: Mutex::new(Vec::new()),
-            }))
-        }
-        #[cfg(target_arch = "wasm32")]
-        TaskPoolRuntime(Arc::new(TaskPoolRuntimeInner { pool }))
-    }
-}
-
-impl Deref for TaskPoolRuntime {
-    type Target = TaskPoolRuntimeInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -55,13 +28,7 @@ impl Runtime for TaskPoolRuntime {
     type Sleep = Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn spawn<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.tasks
-            .lock()
-            .unwrap()
-            .push(self.pool.spawn(Box::pin(f)));
-        #[cfg(target_arch = "wasm32")]
-        self.pool.spawn(Box::pin(f));
+        IoTaskPool::get().spawn(f).detach();
     }
 
     fn now(&self) -> Self::Instant {
@@ -78,7 +45,7 @@ impl Runtime for TaskPoolRuntime {
 
     fn sleep(&self, duration: Duration) -> Self::Sleep {
         Box::pin(async move {
-            Delay::new(duration).await;
+            wasm_timer::Delay::new(duration).await.unwrap();
         })
     }
 }

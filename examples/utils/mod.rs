@@ -1,30 +1,23 @@
 // Arg parser for the examples.
 // 
 // each example gets a different Args struct, which it adds as a bevy resource
-
+use bevy::ecs::system::Resource;
 use clap::{Arg, App as ClapApp, value_t_or_exit};
 
-#[derive(Debug)]
-pub struct SimpleArgs {
-    pub is_server: bool,
-}
-
-#[derive(Debug)]
+#[derive(Resource, Debug)]
 pub struct MessageCoalescingArgs {
-    pub is_server: bool,
     pub pings: usize,
     pub pongs: usize,
     pub manual_flush: bool,
     pub auto_flush: bool,
 }
 
-#[derive(Debug)]
+#[derive(Resource, Debug)]
 pub struct IdleTimeoutArgs {
-    pub is_server: bool,
     pub pings: usize,
     pub pongs: usize,
-    pub idle_timeout_ms: Option<usize>,
-    pub auto_heartbeat_ms: Option<usize>,
+    pub idle_timeout_ms: usize,
+    pub auto_heartbeat_ms: usize,
 }
 
 fn exe_name() -> String {
@@ -38,26 +31,13 @@ fn exe_name() -> String {
 }
 
 #[allow(dead_code)]
-pub fn parse_simple_args() -> SimpleArgs {
-    let matches = ClapApp::new(exe_name())
-        .about("Simple example just sends some packets")
-        .args(server_or_client_args().as_slice())
-        .get_matches();
-    SimpleArgs {
-        is_server: matches.is_present("server")
-    }
-}
-
-#[allow(dead_code)]
 pub fn parse_message_coalescing_args() -> MessageCoalescingArgs {
     let matches = ClapApp::new(exe_name())
         .about("Message coalescing example")
-        .args(server_or_client_args().as_slice())
         .args(flushing_strategy_args().as_slice())
         .args(pings_pongs_args().as_slice())
         .get_matches();
     MessageCoalescingArgs {
-        is_server: matches.is_present("server"),
         pings: value_t_or_exit!(matches, "pings", usize),
         pongs: value_t_or_exit!(matches, "pongs", usize),
         manual_flush: matches.is_present("manual-flush"),
@@ -69,52 +49,14 @@ pub fn parse_message_coalescing_args() -> MessageCoalescingArgs {
 pub fn parse_idle_timeout_args() -> IdleTimeoutArgs {
     let matches = ClapApp::new(exe_name())
         .about("Idle timeout example")
-        .args(server_or_client_args().as_slice())
         .args(pings_pongs_args().as_slice())
         .args(timeout_args().as_slice())
         .get_matches();
-    let idle_timeout_ms = if matches.occurrences_of("idle-drop-timeout") == 1 {
-        Some(value_t_or_exit!(matches, "idle-drop-timeout", usize))
-    } else {
-        None
-    };
-    let auto_heartbeat_ms = if matches.occurrences_of("heartbeat-interval") == 1 {
-        Some(value_t_or_exit!(matches, "heartbeat-interval", usize))
-    } else {
-        None
-    };
     IdleTimeoutArgs {
-        is_server: matches.is_present("server"),
         pings: value_t_or_exit!(matches, "pings", usize),
         pongs: value_t_or_exit!(matches, "pongs", usize),
-        idle_timeout_ms,
-        auto_heartbeat_ms,
-    }
-}
-
-fn server_or_client_args<'a>() -> Vec<Arg<'a, 'a>> {
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "wasm32")] {
-            // will default to client, unless server specified.
-            // wasm32 builds can't be a server.
-            vec![]
-        } else {
-            vec![
-                Arg::with_name("server")
-                .help("Listen as a server")
-                .long("server")
-                .required_unless("client")
-                .conflicts_with("client")
-                .takes_value(false)
-                ,
-                Arg::with_name("client")
-                .help("Connect as a client")
-                .long("client")
-                .required_unless("server")
-                .conflicts_with("server")
-                .takes_value(false)
-            ]
-        }
+        idle_timeout_ms: value_t_or_exit!(matches, "idle-drop-timeout", usize),
+        auto_heartbeat_ms: value_t_or_exit!(matches, "heartbeat-interval", usize),
     }
 }
 
@@ -156,18 +98,17 @@ fn flushing_strategy_args<'a>() -> Vec<Arg<'a, 'a>> {
     ]
 }
 
-#[allow(dead_code)]
 fn pings_pongs_args<'a>() -> Vec<Arg<'a, 'a>> {
     vec![
         Arg::with_name("pings")
         .long("pings")
-        .default_value("0")
+        .default_value("20")
         .help("Number of pings to send, once connected")
         .takes_value(true)
         ,
         Arg::with_name("pongs")
         .long("pongs")
-        .default_value("0")
+        .default_value("10")
         .help("Number of pongs available to send as replies to pings")
         .takes_value(true)
     ]

@@ -1,4 +1,4 @@
-# bevy_networking_turbulence
+# bevy_disturbulence
 
 Networking plugin for [Bevy engine][1] running on [naia-socket][2] and [turbulence][3] libraries.
 
@@ -11,9 +11,8 @@ and in Browser/WASM over UDP-like messages in WebRTC channel.
 Still unfinished, but main features are working. For details see [Milestones][4].
 
 [1]: https://github.com/bevyengine/bevy
-[2]: https://github.com/amethyst/naia-socket
+[2]: https://github.com/naia-lib/naia
 [3]: https://github.com/kyren/turbulence
-[4]: https://github.com/smokku/bevy_networking_turbulence/milestones
 
 ## Testing
 
@@ -21,11 +20,11 @@ Still unfinished, but main features are working. For details see [Milestones][4]
 
 On one terminal run:
 
-    $ env RUST_LOG=debug cargo run --example simple -- --server
+    $ env RUST_LOG=debug cargo run --example simple --features server
 
 On other terminal run:
 
-    $ env RUST_LOG=debug cargo run --example simple -- --client
+    $ env RUST_LOG=debug cargo run --example simple --features client
 
 Observe `PING`/`PONG` exchange between server and client. You can run more clients in more terminals.
 

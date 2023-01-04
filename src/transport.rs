@@ -1,20 +1,15 @@
-#[cfg(not(target_arch = "wasm32"))]
-use bevy::tasks::Task;
-use bevy::{prelude::error, tasks::TaskPool};
+use crate::{
+    channels::{SimpleBufferPool, TaskPoolRuntime},
+    NetworkError,
+};
+use bevy::{log, tasks::IoTaskPool};
 use bytes::Bytes;
+use futures_lite::StreamExt;
 use instant::{Duration, Instant};
 use std::{
-    error::Error,
     net::SocketAddr,
     sync::{Arc, RwLock},
 };
-
-use naia_client_socket::{
-    ClientSocketTrait, MessageSender as ClientSender, Packet as ClientPacket,
-};
-#[cfg(not(target_arch = "wasm32"))]
-use naia_server_socket::{MessageSender as ServerSender, Packet as ServerPacket};
-
 use turbulence::{
     buffer::BufferPacketPool,
     message_channels::{MessageChannels, MessageChannelsBuilder},
@@ -22,20 +17,15 @@ use turbulence::{
     packet_multiplexer::{IncomingMultiplexedPackets, MuxPacket, MuxPacketPool, PacketMultiplexer},
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-use futures_lite::future::block_on;
-
-use futures_lite::StreamExt;
-
-use super::{
-    channels::{SimpleBufferPool, TaskPoolRuntime},
-    NetworkError,
-};
-
 pub type Packet = Bytes;
 pub type MultiplexedPacket = MuxPacket<<BufferPacketPool<SimpleBufferPool> as PacketPool>::Packet>;
 pub type ConnectionChannelsBuilder =
     MessageChannelsBuilder<TaskPoolRuntime, MuxPacketPool<BufferPacketPool<SimpleBufferPool>>>;
+
+#[cfg(all(feature = "client", feature = "server"))]
+compile_error!("The bevy_disturbulence crate can't be compiled with both `client` and `server` features enabled");
+#[cfg(all(not(feature = "client"), not(feature = "server")))]
+compile_error!("The bevy_disturbulence crate must be compiled with either `client` or `server` feature enabled");
 
 #[derive(Debug, Clone)]
 pub struct PacketStats {
@@ -84,16 +74,19 @@ impl PacketStats {
     }
 }
 
-pub trait Connection: Send + Sync {
+pub trait Connection {
     fn remote_address(&self) -> Option<SocketAddr>;
 
-    fn send(&mut self, payload: Packet) -> Result<(), Box<dyn Error + Sync + Send>>;
+    fn send(
+        &mut self,
+        payload: Packet,
+    ) -> Result<(), naia_socket_shared::ChannelClosedError<Packet>>;
 
     fn receive(&mut self) -> Option<Result<Packet, NetworkError>>;
 
     fn build_channels(
         &mut self,
-        builder_fn: &(dyn Fn(&mut ConnectionChannelsBuilder) + Send + Sync),
+        builder_fn: &(dyn Fn(&mut ConnectionChannelsBuilder)),
         runtime: TaskPoolRuntime,
         pool: MuxPacketPool<BufferPacketPool<SimpleBufferPool>>,
     );
@@ -108,43 +101,36 @@ pub trait Connection: Send + Sync {
     fn last_packet_timings(&self) -> (u128, u128);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 pub struct ServerConnection {
-    task_pool: TaskPool,
-
     packet_rx: crossbeam_channel::Receiver<Result<Packet, NetworkError>>,
-    sender: Option<ServerSender>,
+    sender: naia_server_socket::PacketSender,
     client_address: SocketAddr,
     stats: Arc<RwLock<PacketStats>>,
 
     channels: Option<MessageChannels>,
     channels_rx: Option<IncomingMultiplexedPackets<MultiplexedPacket>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    channels_task: Option<Task<()>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 impl ServerConnection {
     pub fn new(
-        task_pool: TaskPool,
         packet_rx: crossbeam_channel::Receiver<Result<Packet, NetworkError>>,
-        sender: ServerSender,
+        sender: naia_server_socket::PacketSender,
         client_address: SocketAddr,
     ) -> Self {
         ServerConnection {
-            task_pool,
             packet_rx,
-            sender: Some(sender),
+            sender,
             client_address,
             stats: Arc::new(RwLock::new(PacketStats::default())),
             channels: None,
             channels_rx: None,
-            channels_task: None,
         }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 impl Connection for ServerConnection {
     fn remote_address(&self) -> Option<SocketAddr> {
         Some(self.client_address)
@@ -154,17 +140,19 @@ impl Connection for ServerConnection {
         self.stats.read().expect("stats lock poisoned").clone()
     }
 
-    fn send(&mut self, payload: Packet) -> Result<(), Box<dyn Error + Sync + Send>> {
+    fn send(
+        &mut self,
+        payload: Packet,
+    ) -> Result<(), naia_socket_shared::ChannelClosedError<Packet>> {
         self.stats
             .write()
             .expect("stats lock poisoned")
             .add_tx(payload.len());
-        block_on(
-            self.sender
-                .as_mut()
-                .unwrap()
-                .send(ServerPacket::new(self.client_address, payload.to_vec())),
-        )
+        self.sender
+            .send(&self.client_address, payload.as_ref())
+            .map_err(|_err: naia_socket_shared::ChannelClosedError<()>| {
+                naia_socket_shared::ChannelClosedError(payload)
+            })
     }
 
     fn last_packet_timings(&self) -> (u128, u128) {
@@ -199,7 +187,7 @@ impl Connection for ServerConnection {
 
     fn build_channels(
         &mut self,
-        builder_fn: &(dyn Fn(&mut ConnectionChannelsBuilder) + Send + Sync),
+        builder_fn: &(dyn Fn(&mut ConnectionChannelsBuilder)),
         runtime: TaskPoolRuntime,
         pool: MuxPacketPool<BufferPacketPool<SimpleBufferPool>>,
     ) {
@@ -211,23 +199,42 @@ impl Connection for ServerConnection {
         let (channels_rx, mut channels_tx) = multiplexer.start();
         self.channels_rx = Some(channels_rx);
 
-        let mut sender = self.sender.take().unwrap();
+        let sender = self.sender.clone();
         let client_address = self.client_address;
         let stats = self.stats.clone();
 
-        self.channels_task = Some(self.task_pool.spawn(async move {
+        let task = async move {
             loop {
-                let packet = channels_tx.next().await.unwrap();
+                let Some(packet) = channels_tx.next().await else {
+                    log::debug!("A server connection is closed, closing the channel builder task");
+                    return;
+                };
                 stats
                     .write()
                     .expect("stats lock poisoned")
                     .add_tx(packet.len());
-                sender
-                    .send(ServerPacket::new(client_address, (*packet).into()))
-                    .await
-                    .unwrap();
+                // TODO: to confirm that this error handling makes sense.
+                //
+                // When a channel is closed, there's indeed no sense to do anything
+                // but finish the task.
+                //
+                // I'm not so sure about the case when the channel is full though...
+                // Possible reasons:
+                // - something is blocking the async executor that naia is using
+                // - the connection hasn't even been properly established (I had a weird
+                //   case when I tried to send packets to the session socket, the queue
+                //   just wasn't being consumed).
+                // If we just skip the error without finishing the task, will the packet
+                // multiplexer try to re-send packets? Do we want any sort of backpressure?
+                if let Err(err) = sender.send(&client_address, packet.as_ref()) {
+                    log::error!("Failed to send a packet: {err}");
+                    return;
+                }
             }
-        }));
+        };
+
+        // The task will finish as soon as `channels_rx` is dropped, so we are safe to detach here.
+        IoTaskPool::get().spawn(task).detach();
     }
 
     fn channels(&mut self) -> Option<&mut MessageChannels> {
@@ -239,38 +246,28 @@ impl Connection for ServerConnection {
     }
 }
 
+#[cfg(feature = "client")]
 pub struct ClientConnection {
-    task_pool: TaskPool,
-
-    socket: Box<dyn ClientSocketTrait>,
-    sender: Option<ClientSender>,
+    socket: naia_client_socket::Socket,
     stats: Arc<RwLock<PacketStats>>,
 
     channels: Option<MessageChannels>,
     channels_rx: Option<IncomingMultiplexedPackets<MultiplexedPacket>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    channels_task: Option<Task<()>>,
 }
 
+#[cfg(feature = "client")]
 impl ClientConnection {
-    pub fn new(
-        task_pool: TaskPool,
-        socket: Box<dyn ClientSocketTrait>,
-        sender: ClientSender,
-    ) -> Self {
+    pub fn new(socket: naia_client_socket::Socket) -> Self {
         ClientConnection {
-            task_pool,
             socket,
-            sender: Some(sender),
             stats: Arc::new(RwLock::new(PacketStats::default())),
             channels: None,
             channels_rx: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            channels_task: None,
         }
     }
 }
 
+#[cfg(feature = "client")]
 impl Connection for ClientConnection {
     fn remote_address(&self) -> Option<SocketAddr> {
         None
@@ -289,25 +286,29 @@ impl Connection for ClientConnection {
         (rx_dur.as_millis(), tx_dur.as_millis())
     }
 
-    fn send(&mut self, payload: Packet) -> Result<(), Box<dyn Error + Sync + Send>> {
+    fn send(
+        &mut self,
+        payload: Packet,
+    ) -> Result<(), naia_socket_shared::ChannelClosedError<Packet>> {
         self.stats
             .write()
             .expect("stats lock poisoned")
             .add_tx(payload.len());
-        self.sender
-            .as_mut()
-            .unwrap()
-            .send(ClientPacket::new(payload.to_vec()))
+        self.socket.packet_sender().send(payload.as_ref()).map_err(
+            |_err: naia_socket_shared::ChannelClosedError<()>| {
+                naia_socket_shared::ChannelClosedError(payload)
+            },
+        )
     }
 
     fn receive(&mut self) -> Option<Result<Packet, NetworkError>> {
-        match self.socket.receive() {
+        match self.socket.packet_receiver().receive() {
             Ok(event) => event.map(|packet| {
                 self.stats
                     .write()
                     .expect("stats lock poisoned")
-                    .add_rx(packet.payload().len());
-                Ok(Packet::copy_from_slice(packet.payload()))
+                    .add_rx(packet.len());
+                Ok(Packet::copy_from_slice(packet))
             }),
             Err(err) => Some(Err(NetworkError::IoError(Box::new(err)))),
         }
@@ -315,7 +316,7 @@ impl Connection for ClientConnection {
 
     fn build_channels(
         &mut self,
-        builder_fn: &(dyn Fn(&mut ConnectionChannelsBuilder) + Send + Sync),
+        builder_fn: &(dyn Fn(&mut ConnectionChannelsBuilder)),
         runtime: TaskPoolRuntime,
         pool: MuxPacketPool<BufferPacketPool<SimpleBufferPool>>,
     ) {
@@ -327,33 +328,42 @@ impl Connection for ClientConnection {
         let (channels_rx, mut channels_tx) = multiplexer.start();
         self.channels_rx = Some(channels_rx);
 
-        let mut sender = self.sender.take().unwrap();
+        let sender = self.socket.packet_sender();
         let stats = self.stats.clone();
 
-        let closure = async move {
+        let task = async move {
             loop {
-                match channels_tx.next().await {
-                    Some(packet) => {
-                        stats
-                            .write()
-                            .expect("stats lock poisoned")
-                            .add_tx(packet.len());
-                        sender.send(ClientPacket::new((*packet).into())).unwrap();
-                    }
-                    None => {
-                        error!("Channel stream Disconnected");
-                        return; // exit task
-                    }
+                let Some(packet) = channels_tx.next().await else {
+                    log::debug!("A client connection is closed, closing the channel builder task");
+                    return;
+                };
+
+                stats
+                    .write()
+                    .expect("stats lock poisoned")
+                    .add_tx(packet.len());
+                // TODO: to confirm that this error handling makes sense.
+                //
+                // When a channel is closed, there's indeed no sense to do anything
+                // but finish the task.
+                //
+                // I'm not so sure about the case when the channel is full though...
+                // Possible reasons:
+                // - something is blocking the async executor that naia is using
+                // - the connection hasn't even been properly established (I had a weird
+                //   case when I tried to send packets to the session socket, the queue
+                //   just wasn't being consumed).
+                // If we just skip the error without finishing the task, will the packet
+                // multiplexer try to re-send packets? Do we want any sort of backpressure?
+                if let Err(err) = sender.send(packet.as_ref()) {
+                    log::error!("Failed to send a packet: {err}");
+                    return;
                 }
             }
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.channels_task = Some(self.task_pool.spawn(closure));
-        }
-        #[cfg(target_arch = "wasm32")]
-        self.task_pool.spawn(closure);
+        // The task will finish as soon as `channels_rx` is dropped, so we are safe to detach here.
+        IoTaskPool::get().spawn_local(task).detach();
     }
 
     fn channels(&mut self) -> Option<&mut MessageChannels> {
@@ -364,9 +374,3 @@ impl Connection for ClientConnection {
         self.channels_rx.as_mut()
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-unsafe impl Send for ClientConnection {}
-
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for ClientConnection {}
