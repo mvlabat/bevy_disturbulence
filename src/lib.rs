@@ -4,6 +4,7 @@ pub use naia_socket_shared::SocketConfig;
 pub use transport::{Connection, ConnectionChannelsBuilder, Packet};
 pub use turbulence::{
     message_channels::{MessageChannelMode, MessageChannelSettings},
+    packet_multiplexer::{IncomingError, IncomingTrySendError},
     reliable_channel::Settings as ReliableChannelSettings,
     unreliable_channel::Settings as UnreliableChannelSettings,
 };
@@ -33,7 +34,7 @@ use turbulence::{
     buffer::BufferPacketPool,
     message_channels::ChannelMessage,
     packet::{Packet as PoolPacket, PacketPool, MAX_PACKET_LEN},
-    packet_multiplexer::{IncomingTrySendError, MuxPacketPool},
+    packet_multiplexer::MuxPacketPool,
 };
 
 pub type ConnectionHandle = u32;
