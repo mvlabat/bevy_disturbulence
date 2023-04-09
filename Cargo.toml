@@ -22,11 +22,11 @@ client = ["naia-client-socket"]
 server = ["naia-server-socket"]
 
 [dependencies]
-bevy = { version = "0.9", default-features = false }
+bevy = { version = "0.10", default-features = false }
 turbulence = "0.4"
-naia-client-socket = { version = "0.13", optional = true }
-naia-server-socket = { version = "0.13", optional = true }
-naia-socket-shared = "0.10.1"
+naia-client-socket = { version = "0.20", optional = true }
+naia-server-socket = { version = "0.20", optional = true }
+naia-socket-shared = "0.20"
 bytes = "1.2"
 futures-lite = "1.12"
 crossbeam-channel = "0.5"
@@ -35,17 +35,17 @@ futures = "0.3"
 wasm-timer = "0.2.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-naia-client-socket = { version = "0.13", optional = true, features = ["wbindgen"] }
-naia-socket-shared = { version = "0.10.1", features = ["wbindgen"] }
+naia-client-socket = { version = "0.20", optional = true, features = ["wbindgen"] }
+naia-socket-shared = { version = "0.20", features = ["wbindgen"] }
 
 [dev-dependencies]
-clap = "2.34.0"
-bevy = { version = "0.9" }
+clap = "3.2"
+bevy = { version = "0.10" }
 serde = { version = "1.0", features = ["derive"] }
 rand = { version = "0.8" }
 console_error_panic_hook = "0.1"
 console_log = "0.2"
-wasm-bindgen = "=0.2.83"
+wasm-bindgen = "=0.2.84"
 
 [[example]]
 name = "channels"
@@ -53,7 +53,7 @@ path = "examples/channels.rs"
 required-features = ["bevy/default"]
 
 [patch.crates-io]
-naia-client-socket = { path = "../naia/socket/client" }
-naia-server-socket = { path = "../naia/socket/server" }
-naia-socket-shared = { path = "../naia/socket/shared" }
-webrtc-unreliable-client = { path = "../webrtc-unreliable-client-0.1.3" }
+#naia-client-socket = { path = "../naia/socket/client" }
+#naia-server-socket = { path = "../naia/socket/server" }
+#naia-socket-shared = { path = "../naia/socket/shared" }
+#webrtc-unreliable-client = { path = "../webrtc-unreliable-client-0.1.3" }

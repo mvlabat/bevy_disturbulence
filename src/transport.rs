@@ -104,7 +104,7 @@ pub trait Connection {
 #[cfg(feature = "server")]
 pub struct ServerConnection {
     packet_rx: crossbeam_channel::Receiver<Result<Packet, NetworkError>>,
-    sender: naia_server_socket::PacketSender,
+    sender: Box<dyn naia_server_socket::PacketSender>,
     client_address: SocketAddr,
     stats: Arc<RwLock<PacketStats>>,
 
@@ -116,7 +116,7 @@ pub struct ServerConnection {
 impl ServerConnection {
     pub fn new(
         packet_rx: crossbeam_channel::Receiver<Result<Packet, NetworkError>>,
-        sender: naia_server_socket::PacketSender,
+        sender: Box<dyn naia_server_socket::PacketSender>,
         client_address: SocketAddr,
     ) -> Self {
         ServerConnection {
@@ -150,7 +150,7 @@ impl Connection for ServerConnection {
             .add_tx(payload.len());
         self.sender
             .send(&self.client_address, payload.as_ref())
-            .map_err(|_err: naia_socket_shared::ChannelClosedError<()>| {
+            .map_err(|_err: naia_server_socket::NaiaServerSocketError| {
                 naia_socket_shared::ChannelClosedError(payload)
             })
     }
@@ -248,7 +248,8 @@ impl Connection for ServerConnection {
 
 #[cfg(feature = "client")]
 pub struct ClientConnection {
-    socket: naia_client_socket::Socket,
+    sender: Box<dyn naia_client_socket::PacketSender>,
+    receiver: Box<dyn naia_client_socket::PacketReceiver>,
     stats: Arc<RwLock<PacketStats>>,
 
     channels: Option<MessageChannels>,
@@ -257,9 +258,13 @@ pub struct ClientConnection {
 
 #[cfg(feature = "client")]
 impl ClientConnection {
-    pub fn new(socket: naia_client_socket::Socket) -> Self {
+    pub fn new(
+        sender: Box<dyn naia_client_socket::PacketSender>,
+        receiver: Box<dyn naia_client_socket::PacketReceiver>,
+    ) -> Self {
         ClientConnection {
-            socket,
+            sender,
+            receiver,
             stats: Arc::new(RwLock::new(PacketStats::default())),
             channels: None,
             channels_rx: None,
@@ -294,15 +299,23 @@ impl Connection for ClientConnection {
             .write()
             .expect("stats lock poisoned")
             .add_tx(payload.len());
-        self.socket.packet_sender().send(payload.as_ref()).map_err(
-            |_err: naia_socket_shared::ChannelClosedError<()>| {
+        self.sender.send(payload.as_ref()).map_err(
+            |err: naia_client_socket::NaiaClientSocketError| {
+                // We don't expect any other error here, as the only reason why sending can fail
+                // in `naia_client_socket` (at the moment of writing) is a closed channel.
+                assert!(matches!(
+                    err,
+                    naia_client_socket::NaiaClientSocketError::SendError
+                ));
+                // TODO: we may need to create our own type, since this one isn't used anywhere
+                //  in the naia codebase and might get removed.
                 naia_socket_shared::ChannelClosedError(payload)
             },
         )
     }
 
     fn receive(&mut self) -> Option<Result<Packet, NetworkError>> {
-        match self.socket.packet_receiver().receive() {
+        match self.receiver.receive() {
             Ok(event) => event.map(|packet| {
                 self.stats
                     .write()
@@ -328,7 +341,7 @@ impl Connection for ClientConnection {
         let (channels_rx, mut channels_tx) = multiplexer.start();
         self.channels_rx = Some(channels_rx);
 
-        let sender = self.socket.packet_sender();
+        let sender = self.sender.clone();
         let stats = self.stats.clone();
 
         let task = async move {

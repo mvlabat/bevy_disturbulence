@@ -17,15 +17,14 @@ use crate::{
     transport::MultiplexedPacket,
 };
 use bevy::{
-    app::{App, CoreStage, Plugin},
+    app::{App, CoreSet, Plugin},
     ecs::{
         event::Events,
-        schedule::{StageLabel, SystemStage},
-        system::ResMut,
+        schedule::IntoSystemConfig,
+        system::{NonSendMut, ResMut},
     },
     log,
-    prelude::NonSendMut,
-    time::FixedTimestep,
+    time::common_conditions::on_timer,
     utils::HashMap,
 };
 use naia_socket_shared::ChannelClosedError;
@@ -38,9 +37,6 @@ use turbulence::{
 };
 
 pub type ConnectionHandle = u32;
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, StageLabel)]
-struct SendHeartbeatsStage;
 
 #[derive(Default)]
 pub struct NetworkingPlugin {
@@ -55,10 +51,10 @@ pub struct NetworkingPlugin {
     /// FixedTimestep for the `heartbeats_and_timeouts` system which checks for idle connections
     /// and sends heartbeats. Does not need to be every frame.
     ///
-    /// The `heartbeats_and_timeouts` system is only added if `idle_timeout_ms` or `auto_heartbeat_ms` are specified.
+    /// The `heartbeats_and_timeouts` system is only added if `idle_timeout_millis` or `auto_heartbeat_millis` are specified.
     ///
     /// Default if None: 0.5 secs
-    pub heartbeats_and_timeouts_timestep_in_seconds: Option<f64>,
+    pub heartbeats_and_timeouts_interval_secs: Option<f64>,
 }
 
 impl Plugin for NetworkingPlugin {
@@ -70,21 +66,14 @@ impl Plugin for NetworkingPlugin {
             self.auto_heartbeat_millis,
         ))
         .add_event::<NetworkEvent>()
-        .add_system(receive_packets_system);
+        .add_system(receive_packets_system.in_base_set(CoreSet::PreUpdate));
         if self.idle_timeout_millis.is_some() || self.auto_heartbeat_millis.is_some() {
-            // heartbeats and timeouts checking/sending only runs infrequently:
-            app.add_stage_after(
-                CoreStage::Update,
-                SendHeartbeatsStage,
-                SystemStage::parallel()
-                    .with_run_criteria(
-                        FixedTimestep::step(
-                            self.heartbeats_and_timeouts_timestep_in_seconds
-                                .unwrap_or(0.5),
-                        )
-                        .with_label("HEARTBEAT"),
-                    )
-                    .with_system(heartbeats_and_timeouts_system),
+            app.add_system(
+                heartbeats_and_timeouts_system
+                    .in_base_set(CoreSet::Update)
+                    .run_if(on_timer(bevy::utils::Duration::from_secs_f64(
+                        self.heartbeats_and_timeouts_interval_secs.unwrap_or(0.5),
+                    ))),
             );
         }
     }
@@ -117,7 +106,8 @@ type ServerChannels =
 
 #[cfg(feature = "server")]
 struct ServerListener {
-    socket: naia_server_socket::Socket,
+    sender: Box<dyn naia_server_socket::PacketSender>,
+    receiver: Box<dyn naia_server_socket::PacketReceiver>,
     channels: ServerChannels,
 }
 
@@ -162,10 +152,11 @@ pub enum NetworkError {
 /// Turbulence will coalesce multiple small messages into a single packet when flush is called.
 /// the default is `OnEverySend` - flushing after each message, which bypasses the coalescing.
 /// You probably want to call flush once per tick instead, in your own system.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub enum MessageFlushingStrategy {
     /// OnEverySend - flush immediately after calling send_message or send_broadcast.
     /// turbulence will never have a chance to coalesce multiple messages into a packet.
+    #[default]
     OnEverySend,
 
     /// Never - you will want a system in (eg) PostUpdate which calls channels.flush for every channel type
@@ -184,12 +175,6 @@ pub enum MessageFlushingStrategy {
     /// builder.add_system_to_stage(CoreStage::PostUpdate, flush_channels.system());
     ///
     Never,
-}
-
-impl Default for MessageFlushingStrategy {
-    fn default() -> MessageFlushingStrategy {
-        MessageFlushingStrategy::OnEverySend
-    }
 }
 
 impl NetworkResource {
@@ -222,12 +207,12 @@ impl NetworkResource {
 
     #[cfg(feature = "server")]
     pub fn listen(&mut self, server_addrs: &naia_server_socket::ServerAddrs) {
-        let mut socket = naia_server_socket::Socket::new(&self.socket_config);
-        socket.listen(server_addrs);
+        let (sender, receiver) = naia_server_socket::Socket::listen(server_addrs, &self.socket_config);
         self.server_listeners.insert(
             server_addrs.session_listen_addr,
             ServerListener {
-                socket,
+                sender,
+                receiver,
                 channels: HashMap::new(),
             },
         );
@@ -248,8 +233,8 @@ impl NetworkResource {
     #[cfg(feature = "server")]
     fn process_server_connections(&mut self, network_events: &mut Events<NetworkEvent>) {
         for listener in self.server_listeners.values_mut() {
-            let mut packet_receiver = listener.socket.packet_receiver();
-            let packet_sender = listener.socket.packet_sender();
+            let mut packet_receiver = listener.receiver.clone();
+            let packet_sender = listener.sender.clone();
             loop {
                 match packet_receiver.receive() {
                     Ok(Some((address, packet))) => {
@@ -325,11 +310,9 @@ impl NetworkResource {
 
     #[cfg(feature = "client")]
     pub fn connect(&mut self, server_session_url: &str) {
-        let mut socket = naia_client_socket::Socket::new(&self.socket_config);
-        let server_session_url = server_session_url.to_string();
-        socket.connect(&server_session_url);
+        let (sender, receiver) = naia_client_socket::Socket::connect(server_session_url, &self.socket_config);
 
-        let mut connection = transport::ClientConnection::new(socket);
+        let mut connection = transport::ClientConnection::new(sender, receiver);
         let handle = self.connection_sequence;
         if let Some(channels_builder_fn) = self.channels_builder_fn.as_ref() {
             log::debug!("Building channels (connection {handle})");
